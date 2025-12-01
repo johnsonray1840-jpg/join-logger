@@ -21,8 +21,131 @@ let notifyBuffer = []; // array of {guild, member}
 let debounceTimer = null;
 let saveScheduled = false;
 
+// ---------------------------
+// Helper: format detailed join log
+// ---------------------------
+function formatJoinLog(member) {
+  const user = member.user;
+  // Display tag (safe)
+  const displayTag =
+    (user.tag && user.tag !== "undefined#undefined")
+      ? user.tag
+      : `${user.username}#${user.discriminator || "0000"}`;
+
+  // timestamps
+  const createdDate = user.createdTimestamp
+    ? `<t:${Math.floor(user.createdTimestamp / 1000)}:F> (<t:${Math.floor(user.createdTimestamp / 1000)}:R>)`
+    : "Unknown";
+
+  const joinedDate = member.joinedTimestamp
+    ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`
+    : "Unknown";
+
+  const guild = member.guild;
+  const nickname = member.nickname || "None";
+  const pending = member.pending ? "Yes" : "No";
+
+  // boost / premium
+  let boostingSince = "Not Boosting";
+  try {
+    // v13 may have premiumSince or premiumSinceTimestamp
+    if (member.premiumSince) {
+      const t = member.premiumSince instanceof Date ? member.premiumSince.getTime() : member.premiumSince;
+      boostingSince = `<t:${Math.floor(t / 1000)}:F>`;
+    } else if (member.premiumSinceTimestamp) {
+      boostingSince = `<t:${Math.floor(member.premiumSinceTimestamp / 1000)}:F>`;
+    }
+  } catch (e) {
+    boostingSince = "Not Boosting";
+  }
+
+  // timeout / communication disabled
+  let timedOutUntil = "No Timeout";
+  try {
+    if (member.communicationDisabledUntilTimestamp) {
+      timedOutUntil = `<t:${Math.floor(member.communicationDisabledUntilTimestamp / 1000)}:F>`;
+    } else if (member.communicationDisabledUntil) {
+      const t = member.communicationDisabledUntil instanceof Date ? member.communicationDisabledUntil.getTime() : member.communicationDisabledUntil;
+      timedOutUntil = `<t:${Math.floor(t / 1000)}:F>`;
+    }
+  } catch (e) {
+    timedOutUntil = "No Timeout";
+  }
+
+  // roles
+  const roles = Array.from(member.roles.cache.values()).filter(r => r && r.id !== guild.id);
+  const rolesCount = roles.length;
+  const highestRole = rolesCount ? roles.sort((a, b) => b.position - a.position)[0] : null;
+  const roleNames = roles.map(r => r.name);
+
+  // avatar & banner
+  let avatarUrl = null;
+  try {
+    avatarUrl = user.displayAvatarURL ? user.displayAvatarURL({ size: 1024, dynamic: true }) : null;
+  } catch (e) {
+    avatarUrl = null;
+  }
+  let bannerUrl = null;
+  try {
+    // user.bannerURL may not exist in v13; try safely
+    if (typeof user.bannerURL === "function") bannerUrl = user.bannerURL({ size: 1024, dynamic: true });
+    else bannerUrl = null;
+  } catch (e) {
+    bannerUrl = null;
+  }
+
+  // flags / badges
+  let flagsArr = [];
+  try {
+    if (user.flags && typeof user.flags.toArray === "function") flagsArr = user.flags.toArray();
+  } catch (e) {
+    flagsArr = [];
+  }
+
+  const lines = [
+    `📥 **Member Joined**`,
+    "```ini",
+    "[User]",
+    `Username = ${displayTag}`,
+    `Mention = <@${user.id}>`,
+    `ID = ${user.id}`,
+    `Bot = ${user.bot ? "Yes" : "No"}`,
+    `System = ${user.system ? "Yes" : "No"}`,
+    "",
+    "[Account Info]",
+    `Created = ${createdDate}`,
+    `Joined Server = ${joinedDate}`,
+    "",
+    "[Server Details]",
+    `Guild = ${guild.name} (${guild.id})`,
+    `Nickname = ${nickname}`,
+    `Pending Screening = ${pending}`,
+    `Boosting Since = ${boostingSince}`,
+    `Timeout Until = ${timedOutUntil}`,
+    "",
+    "[Roles]",
+    `Total Count = ${rolesCount}`,
+    rolesCount ? `Top Role = ${highestRole.name} (${highestRole.id})` : null,
+    roleNames.length ? `Role List = ${roleNames.join(", ")}` : null,
+    "",
+    "[Media]",
+    avatarUrl ? `Avatar = Available` : `Avatar = None`,
+    bannerUrl ? `Banner = Available` : `Banner = None`,
+    `Badges/Flags = ${flagsArr.length ? flagsArr.join(", ") : "None"}`,
+    "```",
+    "",
+    `**Username:** \`\`\`${displayTag}\`\`\``,
+    avatarUrl ? `**Avatar:** ${avatarUrl}` : null,
+    bannerUrl ? `**Banner:** ${bannerUrl}` : null
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+// ---------------------------
 // helper: load persistence
 // returns true if a persistence file existed and was loaded, false if not found
+// ---------------------------
 async function loadPersistence() {
   try {
     const raw = await fs.readFile(cfg.persistenceFile, "utf8");
@@ -43,7 +166,9 @@ async function loadPersistence() {
   }
 }
 
+// ---------------------------
 // helper: save persistence (debounced simple)
+// ---------------------------
 async function savePersistence() {
   // debounce: schedule write only once per short window
   if (saveScheduled) return;
@@ -79,7 +204,10 @@ function diffNewMembers(guildId, fetchedMembers) {
   return newOnes;
 }
 
+// ---------------------------
 // flush notify buffer grouped by guild
+// uses detailed format for each member (same as instant)
+// ---------------------------
 async function flushNotifyBuffer() {
   if (!notifyBuffer.length) return;
   const byGuild = new Map();
@@ -98,15 +226,16 @@ async function flushNotifyBuffer() {
         continue;
       }
 
-      const lines = [`📥 **Members Joined (${members.length})**`];
+      // send each member as a separate detailed message to match instant format
       for (const m of members) {
-        const user = m.user;
-        const tag = user.tag || `${user.username}#${user.discriminator}`;
-        const joined = m.joinedTimestamp ? `<t:${Math.floor(m.joinedTimestamp/1000)}:F>` : "Unknown";
-        lines.push(`• ${tag} — ID: ${user.id} — Joined: ${joined}`);
+        try {
+          const msg = formatJoinLog(m);
+          await channel.send(msg);
+        } catch (err) {
+          console.warn("Failed to send formatted member message:", err);
+        }
       }
 
-      await channel.send(lines.join("\n"));
       console.log(`Sent join notification for ${members.length} members (guild ${guildId})`);
     } catch (err) {
       console.warn("Failed to send notification:", err);
@@ -220,7 +349,17 @@ client.on("ready", async () => {
 
       knownMembers[gid].add(member.id);
       await savePersistence();
-      await scheduleNotify(member, member.guild);
+
+      // INSTANT notification for real event (no debounce)
+      try {
+        const channel = await client.channels.fetch(cfg.logChannelId);
+        if (channel) {
+          const msg = formatJoinLog(member);
+          await channel.send(msg);
+        }
+      } catch (err) {
+        console.warn("Failed to send instant join log:", err);
+      }
     } catch (err) {
       console.warn("Error in guildMemberAdd handler:", err);
     }
